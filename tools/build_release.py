@@ -56,7 +56,8 @@ def build(root, output, runtime_archive=None):
         with zipfile.ZipFile(portable, 'w', zipfile.ZIP_DEFLATED) as bundle:
             for name in COMMON:
                 bundle.write(root / name, 'TokenMeter/app/' + name)
-            bundle.write(root / 'README.md', 'TokenMeter/app/README.md')
+            portable_readme = (root / 'README.md').read_text(encoding='utf-8').replace('[MIT 许可证](LICENSE)', '[MIT 许可证](../LICENSE)')
+            bundle.writestr('TokenMeter/app/README.md', portable_readme)
             if (root / 'LICENSE').is_file():
                 bundle.write(root / 'LICENSE', 'TokenMeter/LICENSE')
             bundle.writestr('TokenMeter/启动看板.cmd', '@echo off\r\npowershell -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "%~dp0app\\launch_dashboard.ps1" -Open -DataDirectory "%~dp0data"\r\nexit /b %errorlevel%\r\n')
