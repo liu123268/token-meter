@@ -51,9 +51,11 @@ def summarize_timing(rows):
         "ttft_records":len(waits), "mean_ttft_ms":sum(waits)/len(waits) if waits else None}
 
 
-def attach_performance(db, where, params, total, rows, software_rows, model_rows, series, software_series, grain):
-    samples=[dict(r) for r in db.execute("""SELECT software,model,time,output_tokens,
-        duration_ms,ttft_ms,decode_ms FROM usage LEFT JOIN request_timing USING(event_key) LEFT JOIN generation_timing USING(event_key) """+where,params)]
+def attach_performance(db, where, params, total, rows, software_rows, model_rows, series, software_series, grain, source="usage"):
+    if source not in ("usage", "dashboard_usage"):
+        raise ValueError("Invalid timing source")
+    samples=[dict(r) for r in db.execute(f"""SELECT software,model,time,output_tokens,
+        duration_ms,ttft_ms,decode_ms FROM {source} LEFT JOIN request_timing USING(event_key) LEFT JOIN generation_timing USING(event_key) """+where,params)]
     groups={key:defaultdict(list) for key in ("pair","software","model","bucket","bucket_software")}
     for sample in samples:
         bucket=db_bucket(sample["time"],grain)

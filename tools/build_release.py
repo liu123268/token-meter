@@ -8,7 +8,7 @@ import zipfile
 from pathlib import Path
 
 MODULES = ('server.py', 'collector.py', 'adapters.py', 'analytics.py', 'performance.py',
-    'codex_tasks.py', 'codex_auxiliary.py', 'deepseek_harness.py', 'official_usage.py', 'reconciliation.py')
+    'codex_tasks.py', 'codex_auxiliary.py', 'deepseek_harness.py', 'official_usage.py', 'reconciliation.py', 'execution_speed.py')
 COMMON = (*MODULES, 'public/index.html', 'public/app.js', 'public/style.css',
     'launch_dashboard.ps1', 'stop_dashboard.ps1', 'windows_common.ps1')
 SOURCE = (*COMMON, '启动看板.cmd', '停止看板.cmd', 'README.md', '.gitignore', '.gitattributes', 'CHANGELOG.md', 'tools/build_release.py')
@@ -21,6 +21,8 @@ GUIDE = '''# Token 看板 · Windows 64 位便携版
 首次启动会在本文件夹创建 data/，读取当前 Windows 用户的 Codex、WorkBuddy、ZCode、MiMo 和 DeepSeek Harness 留存的用量日志。没有日志或日志格式不兼容的软件会显示未发现/未知，不会捏造数据。Codex 账户对账还需要当前电脑安装支持接口的官方 Codex，并由使用者自己登录；不支持时，本机日志统计仍能使用。
 
 关闭浏览器后服务仍在后台采集。双击“停止看板.cmd”停止这份看板；数据保留。再次启动自动读入新增记录。默认不创建开机任务；需要自动启动时，可按 Win+R 输入 shell:startup，把启动入口的快捷方式放进去。
+
+默认自动发现本机日志。配置自定义端口、Codex 日志路径或数据目录时，打开 app/README.md 的「配置」一节。升级时先停止旧版，把新包完整解压到新文件夹。如果要继续使用旧版缓存，可在两个版本都停止后，把旧版的 data/ 复制到新版根目录。保留旧版目录，确认新版本可用后再自行整理。
 
 根目录只需关注启动、停止、data/ 和本说明。app/ 是程序与运行环境，保留完整。不要放在压缩包内部或无写权限的系统目录运行，也不要在多个目录同时启动同一端口。停止后可以移动文件夹；如果自己加了开机快捷方式，要更新其路径。
 

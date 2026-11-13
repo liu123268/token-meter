@@ -140,7 +140,7 @@ def make_handler(collector, assets=None, official=None):
                     if url.path == "/api/reconciliation/export":
                         if set(query) - {"basis", "period"} or any(len(values) != 1 for values in query.values()):
                             raise ValueError("Invalid reconciliation filter")
-                        basis = query.get("basis", ["utc"])[0]
+                        basis = query.get("basis", ["beijing"])[0]
                         period = query.get("period", ["30d"])[0]
                         if basis not in ("utc", "beijing") or period not in ("7d", "30d", "all"):
                             raise ValueError("Invalid reconciliation filter")

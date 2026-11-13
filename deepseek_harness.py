@@ -66,7 +66,7 @@ def reported_usage(raw):
 def session_records(path):
     """One authoritative final usage per assistant message; retired attempts are separate billing."""
     records=[];diagnostics=dict(missing_usage=0,invalid=0,inherited=0,native_records=0)
-    meta=None;opened=None;model=None;provider=None
+    meta=None;opened=None;model=None;provider=None;subagent=False
     with open_session(path) as stream:
         for line in stream:
             if not line.endswith('\n'):break
@@ -83,6 +83,7 @@ def session_records(path):
             if when<meta['createdAt']:
                 if kind in ('assistant/message','assistant/attempt'):diagnostics['inherited']+=1
                 continue
+            if kind=='subagent/descriptor':subagent=True
             if kind in ('request/context','model/selection'):
                 model=data.get('model') or model;provider=data.get('provider') or provider
             if kind=='step/start':opened=dict(turn=data.get('turn'),step=data.get('step'),start=when,attempt_start=when,first=None)
@@ -115,4 +116,8 @@ def session_records(path):
                 diagnostics['native_records']+=1
             elif kind in ('step/end','turn/end'):opened=None
     if meta is None:raise ValueError('Missing session header')
+    # A fork's parentSession alone does not establish that it is a sub-agent.
+    # Apply only the current session's explicit descriptor, after inherited events were excluded.
+    for record in records:record['subagent']=subagent
+    diagnostics['subagent']=subagent
     return records,diagnostics

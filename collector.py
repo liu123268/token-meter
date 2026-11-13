@@ -111,6 +111,15 @@ def initialize_db(path):
             CREATE TABLE IF NOT EXISTS generation_timing (event_key TEXT PRIMARY KEY, decode_ms REAL NOT NULL);
             CREATE TABLE IF NOT EXISTS timing_cursors (path TEXT PRIMARY KEY, identity TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS codex_turn_timing (event_key TEXT PRIMARY KEY,software TEXT NOT NULL,model TEXT NOT NULL,time TEXT NOT NULL,duration_ms REAL NOT NULL,ttft_ms REAL,output_tokens INTEGER);
+            CREATE TABLE IF NOT EXISTS execution_samples (
+                event_key TEXT PRIMARY KEY,software TEXT NOT NULL,model TEXT NOT NULL,
+                time TEXT NOT NULL,started_at TEXT NOT NULL,duration_ms REAL NOT NULL,source TEXT NOT NULL,
+                output_tokens INTEGER,verification TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS execution_samples_time ON execution_samples(time);
+            CREATE TABLE IF NOT EXISTS execution_cursors (
+                software TEXT NOT NULL,path TEXT NOT NULL,identity TEXT NOT NULL,PRIMARY KEY(software,path)
+            );
             CREATE TABLE IF NOT EXISTS adapter_states (software TEXT PRIMARY KEY, state TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS cursors (
                 path TEXT PRIMARY KEY, identity TEXT NOT NULL, offset INTEGER NOT NULL,
@@ -397,7 +406,10 @@ SUMMARY_SELECT = """COUNT(*) AS records,
         COALESCE(SUM(CASE WHEN source='snapshot_delta' THEN 1 ELSE 0 END),0) AS legacy_records,
         COALESCE(SUM(CASE WHEN source='snapshot_delta' THEN total_tokens ELSE 0 END),0) AS legacy_tokens,
         COALESCE(SUM(CASE WHEN source='request' THEN total_tokens ELSE 0 END),0) AS request_tokens,
-        COALESCE(SUM(subagent),0) AS subagent_records, MAX(time) AS last_usage
+        COALESCE(SUM(subagent),0) AS subagent_records,
+        COALESCE(SUM(CASE WHEN subagent=1 THEN total_tokens ELSE 0 END),0) AS subagent_tokens,
+        COALESCE(SUM(CASE WHEN subagent=0 THEN total_tokens ELSE 0 END),0) AS main_agent_tokens,
+        MAX(time) AS last_usage
 """
 
 

@@ -1,13 +1,41 @@
 """Calendar analytics over the local derived index, never provider billing."""
 from performance import attach_performance
+from execution_speed import execution_statistics
 import csv
 import io
 import json
 from datetime import datetime, timedelta, date
-from collector import LOCAL_ZONE, SUMMARY_SELECT, complete_summary, connect, summarize, time_string
+from collector import LOCAL_ZONE, SUMMARY_SELECT, complete_summary, connect, time_string
 
 SOFTWARE = ("Codex", "WorkBuddy", "ZCode", "MiMo Desktop", "DeepSeek Harness")
-SCOPE = "((software='Codex' AND is_gpt_model(model)) OR software IN ('WorkBuddy','ZCode','MiMo Desktop','DeepSeek Harness'))"
+SCOPE = "software IN ('Codex','WorkBuddy','ZCode','MiMo Desktop','DeepSeek Harness')"
+
+
+def create_dashboard_source(db):
+    """One read-only source for totals, calendar buckets, model rows, and timing.
+
+    Preserve native aliases without inventing a GPT model. Identical requests
+    already present in the primary index and contradictory evidence are excluded.
+    This temporary view does not copy or alter recorded usage.
+    """
+    db.execute("""CREATE TEMP VIEW dashboard_usage AS
+        SELECT * FROM main.usage
+        WHERE (software='Codex' AND is_gpt_model(model))
+           OR software IN ('WorkBuddy','ZCode','MiMo Desktop','DeepSeek Harness')
+        UNION ALL
+        SELECT a.event_key,a.software,a.client,a.model,a.thread_id,a.time,
+               a.input_tokens,a.cached_input_tokens,a.cache_write_input_tokens,
+               a.output_tokens,a.reasoning_output_tokens,a.total_tokens,a.source,a.subagent
+        FROM main.codex_auxiliary_usage a
+        WHERE a.software='Codex' AND a.provider='openai' AND a.source='request'
+          AND a.conflict=0 AND NOT is_gpt_model(a.model)
+          AND NOT EXISTS (SELECT 1 FROM main.usage u WHERE u.event_key=a.event_key)
+        """)
+
+
+def summarize_dashboard(db, where='', parameters=()):
+    row = dict(db.execute(f'SELECT {SUMMARY_SELECT} FROM dashboard_usage {where}', parameters).fetchone())
+    return complete_summary(row)
 
 
 def parse_day(value):
@@ -35,17 +63,17 @@ def trend_context(db, base_where, params, start, end, grain, total, series, soft
               time_string(datetime.combine(end+timedelta(days=1),datetime.min.time(),LOCAL_ZONE))]
     expression = "date(time,'+8 hours')"
     actual = {r["bucket"]:complete_summary(dict(r)) for r in db.execute(
-        f"SELECT {expression} AS bucket,{SUMMARY_SELECT} FROM usage {where} GROUP BY {expression}",values)}
-    empty = summarize(db,"WHERE 0")
+        f"SELECT {expression} AS bucket,{SUMMARY_SELECT} FROM dashboard_usage {where} GROUP BY {expression}",values)}
+    empty = summarize_dashboard(db,"WHERE 0")
     buckets = [{**actual.get((first+timedelta(days=i)).isoformat(),empty),
                 "bucket":(first+timedelta(days=i)).isoformat()} for i in range((end-first).days+1)]
     by_software = [complete_summary(dict(r)) for r in db.execute(
-        f"SELECT {expression} AS bucket,software,{SUMMARY_SELECT} FROM usage {where} GROUP BY {expression},software",values)]
+        f"SELECT {expression} AS bucket,software,{SUMMARY_SELECT} FROM dashboard_usage {where} GROUP BY {expression},software",values)]
     softwares = [complete_summary(dict(r)) for r in db.execute(
-        f"SELECT software,{SUMMARY_SELECT} FROM usage {where} GROUP BY software",values)]
+        f"SELECT software,{SUMMARY_SELECT} FROM dashboard_usage {where} GROUP BY software",values)]
     softwares.sort(key=lambda r:r['total_tokens'],reverse=True)
     return dict(range=dict(start=first.isoformat(),end=end.isoformat(),grain='day'),
-                totals=summarize(db,where,values),series=buckets,software_series=by_software,
+                totals=summarize_dashboard(db,where,values),series=buckets,software_series=by_software,
                 software_rows=softwares,expanded=True)
 
 
@@ -80,15 +108,16 @@ def dashboard_statistics(db_path, period, model, now, software, start_date, end_
                              time_string(datetime.combine(end + timedelta(days=1), datetime.min.time(), LOCAL_ZONE))])
     with connect(db_path) as db:
         db.execute("BEGIN")
-        total = summarize(db, where, range_params)
-        today_total = summarize(db, base_where + " AND time>=?", [*params,time_string(today)])
-        previous_day = summarize(db, base_where + " AND time>=? AND time<?",
+        create_dashboard_source(db)
+        total = summarize_dashboard(db, where, range_params)
+        today_total = summarize_dashboard(db, base_where + " AND time>=?", [*params,time_string(today)])
+        previous_day = summarize_dashboard(db, base_where + " AND time>=? AND time<?",
                                  [*params,time_string(today-timedelta(days=1)),time_string(today)])
-        day_before = summarize(db, base_where + " AND time>=? AND time<?",
+        day_before = summarize_dashboard(db, base_where + " AND time>=? AND time<?",
                                [*params,time_string(today-timedelta(days=2)),time_string(today-timedelta(days=1))])
         recent_days = [dict(label=label,date=(today-timedelta(days=offset)).date().isoformat(),summary=value)
                        for label,offset,value in (("前天",2,day_before),("昨天",1,previous_day),("今天",0,today_total))]
-        first = db.execute(f"SELECT MIN(time) FROM usage {where}",range_params).fetchone()[0]
+        first = db.execute(f"SELECT MIN(time) FROM dashboard_usage {where}",range_params).fetchone()[0]
         if start is None:
             start = datetime.fromisoformat(first.replace("Z","+00:00")).astimezone(LOCAL_ZONE).date() if first else end
         # Short ranges retain each calendar day; long histories use monthly buckets.
@@ -96,7 +125,7 @@ def dashboard_statistics(db_path, period, model, now, software, start_date, end_
         expression = "date(time,'+8 hours')" if grain == "day" else "strftime('%Y-%m',time,'+8 hours')"
         def grouped(group):
             return [complete_summary(dict(row)) for row in db.execute(
-                f"SELECT {group},{SUMMARY_SELECT} FROM usage {where} GROUP BY {group}",range_params)]
+                f"SELECT {group},{SUMMARY_SELECT} FROM dashboard_usage {where} GROUP BY {group}",range_params)]
         rows = grouped("software,model")
         rows.sort(key=lambda r:r["total_tokens"],reverse=True)
         software_rows = grouped("software")
@@ -104,11 +133,11 @@ def dashboard_statistics(db_path, period, model, now, software, start_date, end_
         model_rows = grouped("model")
         model_rows.sort(key=lambda r:r["total_tokens"],reverse=True)
         actual = {r["bucket"]:complete_summary(dict(r)) for r in db.execute(
-            f"SELECT {expression} AS bucket,{SUMMARY_SELECT} FROM usage {where} GROUP BY {expression}",range_params)}
+            f"SELECT {expression} AS bucket,{SUMMARY_SELECT} FROM dashboard_usage {where} GROUP BY {expression}",range_params)}
         software_series = [complete_summary(dict(r)) for r in db.execute(
-            f"SELECT {expression} AS bucket,software,{SUMMARY_SELECT} FROM usage {where} GROUP BY {expression},software",range_params)]
+            f"SELECT {expression} AS bucket,software,{SUMMARY_SELECT} FROM dashboard_usage {where} GROUP BY {expression},software",range_params)]
         # SQL provides a genuine zero-row aggregate; unknown ratios remain null.
-        empty = summarize(db,"WHERE 0")
+        empty = summarize_dashboard(db,"WHERE 0")
         buckets = []
         current = start if grain == "day" else start.replace(day=1)
         while current <= end:
@@ -118,11 +147,15 @@ def dashboard_statistics(db_path, period, model, now, software, start_date, end_
                 current += timedelta(days=1)
             else:
                 current = current.replace(year=current.year+1,month=1) if current.month == 12 else current.replace(month=current.month+1)
-        attach_performance(db,where,range_params,total,rows,software_rows,model_rows,buckets,software_series,grain)
+        attach_performance(db,where,range_params,total,rows,software_rows,model_rows,buckets,software_series,grain,source="dashboard_usage")
         trend = trend_context(db,base_where,params,start,end,grain,total,buckets,software_series,software_rows)
         from codex_tasks import task_summary
         codex_tasks,task_models=task_summary(db,where.replace(SCOPE,'1'),range_params)
+        execution=execution_statistics(db,where,range_params,software,model,now)
+        execution_models={(item['software'],item['model']):item for item in execution['model_rows']}
         for row in rows:
+            measured=execution_models.get((row['software'],row['model']),{})
+            for key in ('output_tps','valid_tasks','output_tokens','duration_ms'):row['execution_'+key]=measured.get(key)
             task=task_models.get(row['model'],{}) if row['software']=='Codex' else {}
             for key in ('output_tps','mean_request_ms','mean_ttft_ms','timed_records'):row['task_'+key]=task.get(key)
         model_params = [time_string(now)]
@@ -130,7 +163,7 @@ def dashboard_statistics(db_path, period, model, now, software, start_date, end_
         if software:
             model_where += " AND software=?"
             model_params.append(software)
-        models = [r[0] for r in db.execute("SELECT DISTINCT model FROM usage " + model_where + " ORDER BY model",model_params)]
+        models = [r[0] for r in db.execute("SELECT DISTINCT model FROM dashboard_usage " + model_where + " ORDER BY model",model_params)]
         states = [json.loads(r[0]) for r in db.execute("SELECT state FROM cursors")]
         states = [s for s in states if s.get("software","Codex") == "Codex"]
         adapters = {r[0]:json.loads(r[1]) for r in db.execute("SELECT software,state FROM adapter_states")}
@@ -138,11 +171,11 @@ def dashboard_statistics(db_path, period, model, now, software, start_date, end_
         **{k:sum(s.get(k,0) for s in states) for k in ("invalid","baseline_gaps","resets","malformed","mixed_gaps","conflicts","excluded_records")}}
     capabilities = [{"software":name,"status":"connected" if name == "Codex" else
         adapters.get(name,{}).get("status","pending")} for name in SOFTWARE]
-    return {"trend":trend,"recent_days":recent_days,"codex_tasks":codex_tasks,"totals":total,"today":today_total,"yesterday":previous_day,"rows":rows,"models":models,
+    return {"execution_speed":execution,"trend":trend,"recent_days":recent_days,"codex_tasks":codex_tasks,"totals":total,"today":today_total,"yesterday":previous_day,"rows":rows,"models":models,
         "software_rows":software_rows,"model_rows":model_rows,"series":buckets,"software_series":software_series,
         "range":{"start":start.isoformat(),"end":end.isoformat(),"grain":grain,"as_of":time_string(now)},
         "diagnostics":diagnostics,"adapter_diagnostics":adapters,"software":software,"period":period,
-        "timezone":"Asia/Shanghai","scope":"Local agents; Codex GPT only","capabilities":capabilities}
+        "timezone":"Asia/Shanghai","scope":"Local agents; Codex recorded GPT and explicit OpenAI aliases","capabilities":capabilities}
 
 
 def export_csv(data, view="rows", search=""):
@@ -159,7 +192,9 @@ def export_csv(data, view="rows", search=""):
         ("p95_request_ms","P95请求耗时ms"),("timed_records","有耗时记录"),
         ("timing_unknown_records","耗时未知记录"),("mean_ttft_ms","平均首Token等待ms"),("ttft_records","有首Token记录"),
         ("decode_tps","生成速度Token/s（首Token至完成）"),("decode_records","有生成耗时记录"),
-        ("task_output_tps","Codex任务输出速度Token/s（含工具）"),("task_mean_request_ms","Codex任务平均耗时ms")]
+        ("execution_output_tps","主任务执行输出速率Token/s（含工具与等待）"),
+        ("execution_valid_tasks","执行速率有效主任务"),("execution_output_tokens","执行速率已核对输出Token"),
+        ("execution_duration_ms","执行速率对应累计执行ms")]
     buffer = io.StringIO(newline="")
     writer = csv.writer(buffer)
     writer.writerow([title for _,title in fields])

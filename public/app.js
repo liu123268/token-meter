@@ -37,26 +37,31 @@ const navMedia=matchMedia('(max-width:900px)');
 function syncNavOrientation(){document.querySelector('.tabs').setAttribute('aria-orientation',navMedia.matches?'horizontal':'vertical');}
 navMedia.addEventListener('change',syncNavOrientation);syncNavOrientation();
 function filterChanged(){ page=1;selectedBucket='';chartKey='';$('date-error').textContent='';refresh(); }
-$('software').addEventListener('change',()=>{$('model').value='';$('speed-basis').value=$('software').value==='Codex'?'task':$('software').value==='DeepSeek Harness'?'decode':'request';filterChanged();});
+$('software').addEventListener('change',()=>{$('model').value='';filterChanged();});
 $('model').addEventListener('change',filterChanged);
 $('period').addEventListener('change',()=>{$('custom-range').hidden=$('period').value!=='custom';if($('period').value==='custom')$('start').focus();else filterChanged();});
 $('custom-range').addEventListener('submit',e=>{e.preventDefault();if($('start').value>$('end').value||$('end').value>dayNow()){$('date-error').textContent='请选择开始不晚于结束、结束不晚于今天的日期。';return;}filterChanged();});
-$('reset').addEventListener('click',()=>{$('software').value=$('model').value='';$('period').value='7d';$('speed-basis').value='request';$('custom-range').hidden=true;$('search').value='';filterChanged();});
+$('reset').addEventListener('click',()=>{$('software').value=$('model').value='';$('period').value='7d';$('custom-range').hidden=true;$('search').value='';filterChanged();});
 $('refresh').addEventListener('click',()=>refresh());
-$('see-details').addEventListener('click',()=>tab('details',true));$('see-sources').addEventListener('click',()=>tab('sources',true));
+$('see-details').addEventListener('click',()=>tab('details',true));
 function cell(row,text,cls=''){const td=document.createElement('td');td.textContent=text;if(cls)td.className=cls;row.append(td);return td;}
 const decimal=v=>v==null?'未知':new Intl.NumberFormat('zh-CN',{maximumFractionDigits:1}).format(v);
 const seconds=v=>v==null?'未知':decimal(v/1000)+' 秒';
-function renderPerformance(){
-  const basis=$('speed-basis').value,t=basis==='task'?data.codex_tasks:data.totals;
-  const value=basis==='decode'?t.decode_tps:t.output_tps;
-  $('speed-rate-label').textContent=basis==='task'?'任务输出速度（含工具）':basis==='decode'?'生成区间输出速度':'端到端输出速度';
-  $('speed-duration-label').textContent=basis==='task'?'平均任务耗时':'平均请求耗时';
-  $('speed-p95-label').textContent=basis==='task'?'P95 任务耗时':'P95 请求耗时';
-  $('speed-tps').textContent=value==null?'未知':decimal(value)+' tok/s';$('speed-duration').textContent=seconds(t.mean_request_ms);$('speed-p95').textContent=seconds(t.p95_request_ms);$('speed-ttft').textContent=seconds(t.mean_ttft_ms);
-  $('speed-coverage').textContent=basis==='task'?`${n(t.records)} 轮有任务耗时 · ${n(t.verified_output_turns)} 轮可核对完整用量 · 包含工具时间`:basis==='decode'?`${n(t.decode_records)} / ${n(t.records)} 条有生成区间 · ${n(t.ttft_records)} 条有首 Token 时间 · 耗时列仍为完整请求`:`${n(t.timed_records)} / ${n(t.records)} 条记录有耗时 · ${n(t.ttft_records)} 条有首 Token 时间 · 仅统计有效样本`;
+const executionDay=value=>value?new Intl.DateTimeFormat('sv-SE',{timeZone:'Asia/Shanghai',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date(value)):'';
+function renderExecution(){
+  const body=document.createDocumentFragment();
+  for(const item of data.execution_speed?.rows||[]){
+    const historical=item.current.output_tps==null&&item.history.output_tps!=null;
+    const sample=historical?item.history:item.current;
+    const value=sample.output_tps;
+    const row=document.createElement('tr');cell(row,item.software);
+    const speed=cell(row,value==null?'—':decimal(value)+' tok/s');
+    if(value==null)speed.title='暂无这项速度';
+    if(historical){const tag=document.createElement('span');tag.className='execution-reference';tag.textContent='历史';tag.title=executionDay(sample.first_completed_at)+' 至 '+executionDay(sample.last_completed_at);speed.append(tag);}
+    body.append(row);
+  }
+  $('execution-rows').replaceChildren(body);
 }
-$('speed-basis').addEventListener('change',()=>{if(data){renderPerformance();renderRows();}});
 $('see-speed').addEventListener('click',()=>{$('show-speed').checked=true;renderRows();tab('details',true);});
 function rate(row){return row.records ? pct(row.cache_hit_ratio) : '—';}
 function render() {
@@ -66,23 +71,24 @@ function render() {
   const modelSignature=JSON.stringify(data.models);
   if(modelSignature!==modelKey){const selected=$('model').value;const options=[new Option('全部模型',''),...data.models.map(x=>new Option(x,x))];if(selected&&!data.models.includes(selected))options.push(new Option(selected,selected));$('model').replaceChildren(...options);$('model').value=selected;modelKey=modelSignature;}
   $('today-total').textContent=n(data.today.total_tokens);
-  $('today-note').textContent=`${n(data.today.records)} 条计数记录 · 今天截至目前`;
+  $('today-note').textContent='今天截至目前';
+  $('today-total').closest('article').hidden=data.period==='today';
   $('range-title').textContent=`${labels[data.period]}用量`;$('total').textContent=n(t.total_tokens);
   $('token-split').textContent=`输入 ${n(t.input_tokens)} · 输出 ${n(t.output_tokens)}`;
+  $('agent-split').hidden=data.software!=='DeepSeek Harness';
+  $('agent-split').textContent=data.software==='DeepSeek Harness'?`主会话 ${n(t.main_agent_tokens)} · 子 Agent ${n(t.subagent_tokens)} Token`:'';
   $('hit-rate').textContent=rate(t);$('uncached').textContent=t.records ? n(t.uncached_input_tokens) : '—';
-  $('cache-note').textContent=t.cache_unknown_records ? `${n(t.cache_unknown_records)} 条记录缺少缓存字段` : `缓存读取 ${n(t.cached_input_tokens)} Token`;
+  $('cache-note').textContent=t.cache_unknown_records&&t.cached_input_tokens===0?'缓存读取未提供':`缓存读取 ${n(t.cached_input_tokens)} Token`;
   $('miss-note').textContent=t.cache_hit_ratio==null ? '缓存字段不足时无法计算' : `未命中比例 ${pct(t.cache_miss_ratio)} · 仅针对输入`;
-  $('scope').textContent=`${data.range.start} 至 ${data.range.end} · ${data.software||'全部软件'} · ${$('model').value||'全部模型'}`;
-  $('status').textContent=c.phase==='ready' ? '本地同步中 · 每 3 秒更新' : c.phase==='scanning' ? `正在索引 ${c.indexed_files}/${c.files}` : c.phase==='error' ? '本地索引暂不可用' : '正在建立本地索引';
-  $('updated').textContent=c.last_scan ? '最近扫描 '+new Intl.DateTimeFormat('zh-CN',{timeZone:'Asia/Shanghai',hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false}).format(new Date(c.last_scan)) : '等待首次扫描';
+  $('scope').textContent=`${data.range.start} 至 ${data.range.end} · ${data.software||'全部软件'} · ${$('model').value||'全部模型'} · 北京时间（UTC+8）`;
+  $('status').textContent=c.phase==='ready' ? '自动更新' : c.phase==='scanning' ? '正在更新' : c.phase==='error' ? '暂时无法更新' : '正在准备';
+  $('updated').textContent=c.last_scan ? '最近更新 '+new Intl.DateTimeFormat('zh-CN',{timeZone:'Asia/Shanghai',hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false}).format(new Date(c.last_scan)) : '等待首次更新';
   $('error').hidden=!c.error;$('error').textContent=c.error||'';
-  $('coverage').textContent=`${n(t.records)} 条计数记录 · 旧格式推算占 ${pct(t.total_tokens ? t.legacy_tokens/t.total_tokens : 0)} · 本机记录可能不完整`;
   
   const unavailable=data.capabilities.find(c=>c.software===data.software&&['unverified','not_found','pending','error'].includes(c.status)&&data.totals.records===0);
-  const codexScope=!data.software||data.software==='Codex';
-  $('scope-notice').hidden=!unavailable&&!codexScope;$('scope-notice').textContent=unavailable?'该来源暂不可用，请在数据来源中查看状态。':codexScope?'Codex 仅计本机 GPT；账户差额见“Codex 对账”。':'';
+  $('scope-notice').hidden=!unavailable;$('scope-notice').textContent=unavailable?'暂未获取到该软件的用量。':'';
   if(unavailable){$('today-total').textContent=$('total').textContent='—';$('today-note').textContent=$('token-split').textContent='等待可靠的用量来源';}
-  renderPerformance();renderChart();renderRanking();renderRows();renderSources();
+  renderExecution();renderChart();renderRanking();renderRows();renderSources();
 }
 function svg(tag, attrs={}, text=''){const e=document.createElementNS('http://www.w3.org/2000/svg',tag);for(const[k,v]of Object.entries(attrs))e.setAttribute(k,v);if(text)e.textContent=text;return e;}
 function metricValue(row,key){if(!row)return key==='cache_hit_ratio'?null:0;return row.records===0&&key==='uncached_input_tokens'?0:row[key];}
@@ -96,13 +102,14 @@ function niceScale(values,key){
   return {max,ticks:Array.from({length:Math.round(max/step)+1},(_,i)=>i*step),
     unit:'Token',format:short};
 }
-function chartSeries(){const key=$('metric').value;if(!$('compare').checked)return [{name:'所选合计',rows:chartData().series,cls:'series0'}];return chartData().software_rows.slice(0,6).map((r,i)=>({name:r.software,cls:'series'+i,rows:chartData().series.map(d=>{const match=chartData().software_series.find(s=>s.software===r.software&&s.bucket===d.bucket);return match||{bucket:d.bucket,records:0,[key]:key==='cache_hit_ratio'?null:0};})}));}
+function chartSeries(){const key=$('metric').value;if(!$('compare').checked)return [{name:'所选合计',rows:chartData().series,cls:'series0'}];return chartData().software_rows.slice(0,6).map((r,i)=>({name:r.software==='DeepSeek Harness'?'DeepSeek Harness · 含子 Agent':r.software,cls:'series'+i,rows:chartData().series.map(d=>{const match=chartData().software_series.find(s=>s.software===r.software&&s.bucket===d.bucket);return match||{bucket:d.bucket,records:0,[key]:key==='cache_hit_ratio'?null:0};})}));}
 function renderChart(){
   const key=$('metric').value,width=Math.min(960,Math.max(240,$('chart').clientWidth||960)),signature=JSON.stringify([chartData().series,chartData().software_series,chartData().range,data.range,data.software,$('model').value,key,$('compare').checked,width]);
   if(signature===chartKey){if(!chartData().series.some(r=>r.bucket===selectedBucket))selectPoint(chartData().series.length-1);else updatePoint();return;}chartKey=signature;
   const focusedBucket=document.activeElement?.closest('#chart .hit')?.getAttribute('data-bucket');const chart=$('chart');chart.setAttribute('viewBox',`0 0 ${width} 270`);chart.replaceChildren(svg('title',{},'悬浮到日期查看精确用量，可用左右方向键移动。'));
+  $('trend-title').textContent=data.software==='Codex'?'Codex 用量趋势':data.software==='DeepSeek Harness'?'DeepSeek Harness 用量趋势（含子 Agent）':'用量趋势';
   const list=chartSeries();const legend=document.createDocumentFragment();for(const item of list){const span=document.createElement('span'),i=document.createElement('i');i.className=item.cls;span.append(i,document.createTextNode(item.name));legend.append(span);}$('legend').replaceChildren(legend);
-  $('trend-note').textContent=`${chartData().range.start} 至 ${chartData().range.end} · ${chartData().range.grain==='day'?'按日':'按月'}${chartData().expanded?' · 短范围保留 7 天对比':''}`;
+  $('trend-note').textContent=`${chartData().range.start} 至 ${chartData().range.end} · 北京时间（UTC+8） · ${chartData().range.grain==='day'?'按日':'按月'}${chartData().expanded?' · 短范围保留 7 天对比':''}`;
   const values=list.flatMap(s=>s.rows.map(r=>metricValue(r,key))).filter(v=>v!=null);const scale=niceScale(values,key),max=scale.max;
   const left=Math.max(64,...scale.ticks.map(v=>scale.format(v).length*7+(scale.format(v).match(/[万亿]/g)||[]).length*4+16)),right=width-12,span=right-left;chart.dataset.plotLeft=String(left);const x=i=>chartData().series.length===1?(left+right)/2:left+i*span/(chartData().series.length-1),y=v=>215-v/max*185;
   chart.append(svg('text',{x:8,y:14,class:'axis-unit'},scale.unit));for(const value of scale.ticks){const py=y(value);chart.append(svg('line',{x1:left,x2:right,y1:py,y2:py,class:'grid','data-value':value}),svg('text',{x:left-8,y:py+4,'text-anchor':'end',class:'axis-tick'},scale.format(value)));}
@@ -124,7 +131,7 @@ function renderChart(){
 }
 function selectPoint(index){if(!data)return;selectedBucket=chartData().series[index]?.bucket||'';updatePoint();}
 function updatePoint(){const i=chartData().series.findIndex(s=>s.bucket===selectedBucket);if(i<0)return;const r=chartData().series[i],key=$('metric').value;const caption=$('metric').selectedOptions[0].textContent;
-  $('point-title').textContent=r.bucket;let text=`${caption} ${key==='cache_hit_ratio'?rate(r):n(metricValue(r,key))} · ${n(r.records)} 条记录`;
+  $('point-title').textContent=r.bucket+' · 北京时间';let text=`${caption} ${key==='cache_hit_ratio'?rate(r):n(metricValue(r,key))}`;
   if($('compare').checked)text=chartSeries().map(s=>`${s.name} ${key==='cache_hit_ratio'?rate(s.rows[i]):n(metricValue(s.rows[i],key))}`).join(' · ');
   $('point-value').textContent=text;if(hoverPosition)renderTooltip();$('point-prev').disabled=i===0;$('point-next').disabled=i===chartData().series.length-1;$('drill').textContent=chartData().range.grain==='day'?'查看当天明细':'查看当月明细';
   const line=$('chart-selection');if(line){const width=Number($('chart').viewBox.baseVal.width),left=Number($('chart').dataset.plotLeft)||80,right=width-12;const x=chartData().series.length===1?(left+right)/2:left+i*(right-left)/(chartData().series.length-1);line.setAttribute('x1',x);line.setAttribute('x2',x);}
@@ -136,11 +143,13 @@ function renderTooltip(){
   const index=chartData().series.findIndex(r=>r.bucket===selectedBucket);
   if(index<0)return;
   const row=chartData().series[index],key=$('metric').value,tip=$('chart-tooltip');
-  const date=document.createElement('strong');date.textContent=row.bucket;
+  const date=document.createElement('strong');date.textContent=row.bucket+'（北京时间）';
   const lines=$('compare').checked?chartSeries().map(series=>({name:series.name,row:series.rows[index]})):
     [{name:$('metric').selectedOptions[0].textContent,row}];
   const nodes=lines.map(item=>{const line=document.createElement('span');line.textContent=`${item.name}：${key==='cache_hit_ratio'?rate(item.row):n(metricValue(item.row,key))}${key==='cache_hit_ratio'?'':' Token'}`;return line;});
-  tip.replaceChildren(date,...nodes);tip.hidden=false;
+  if(data.software==='DeepSeek Harness'&&key==='total_tokens'){for(const [label,value] of [['主会话',row.main_agent_tokens],['子 Agent',row.subagent_tokens]]){const line=document.createElement('span');line.textContent=`${label}：${n(value)} Token`;nodes.push(line);}}
+  const boundary=document.createElement('span');boundary.textContent=chartData().range.grain==='day'?'00:00–24:00 · UTC+8':'按北京时间分月 · UTC+8';
+  tip.replaceChildren(date,boundary,...nodes);tip.hidden=false;
   const frame=$('chart-frame').getBoundingClientRect();
   const x=hoverPosition.x-frame.left,y=hoverPosition.y-frame.top;
   tip.style.left=Math.max(4,Math.min(x+12,frame.width-tip.offsetWidth-4))+'px';
@@ -167,12 +176,12 @@ function renderRanking(){const group=$('rank-by').value,all=data[group==='softwa
 $('rank-by').addEventListener('change',()=>data&&renderRanking());
 function renderRows(){if(!data)return;const search=$('search').value.trim().toLocaleLowerCase(),sort=$('sort').value;let rows=data.rows.filter(r=>(r.software+' '+r.model).toLocaleLowerCase().includes(search));rows=[...rows].sort((a,b)=>sort==='model'?a.model.localeCompare(b.model):sort==='cache_hit_ratio'?(a[sort]??Infinity)-(b[sort]??Infinity):(b[sort]??-1)-(a[sort]??-1));
   const size=Number($('page-size').value),pages=Math.max(1,Math.ceil(rows.length/size));page=Math.min(page,pages);
-  const columns=[['total_tokens','总 Token'],['input_tokens','输入'],['output_tokens','输出'],['cache_hit_ratio','缓存命中率']];if($('show-speed').checked){const basis=$('speed-basis').value;columns.push([basis==='decode'?'decode_tps':basis==='task'?'task_output_tps':'output_tps',basis==='decode'?'生成速度 tok/s':basis==='task'?'任务速度 tok/s':'输出速度 tok/s'],[basis==='task'?'task_mean_request_ms':'mean_request_ms',basis==='task'?'平均任务耗时':'平均请求耗时'],[basis==='task'?'task_mean_ttft_ms':'mean_ttft_ms','首 Token 等待'],[basis==='decode'?'decode_records':basis==='task'?'task_timed_records':'timed_records',basis==='task'?'任务样本':'有耗时记录']);}if($('extended').checked)columns.push(['cached_input_tokens','缓存读取'],['uncached_input_tokens','未缓存输入'],['records','计数记录'],['legacy_tokens','旧格式推算'],['reasoning_output_tokens','推理（已知）'],['cache_write_input_tokens','缓存写入（已知）']);
+  const columns=[['total_tokens','总 Token'],['input_tokens','输入'],['output_tokens','输出'],['cache_hit_ratio','缓存命中率']];if($('show-speed').checked)columns.push(['execution_output_tps','整轮输出速率 tok/s']);if($('extended').checked)columns.push(['cached_input_tokens','缓存读取'],['uncached_input_tokens','未缓存输入'],['reasoning_output_tokens','推理（已知）'],['cache_write_input_tokens','缓存写入（已知）']);
   const head=document.createElement('tr');const first=document.createElement('th');first.textContent='模型 / 软件';first.scope='col';head.append(first);for(const[,label]of columns){const th=document.createElement('th');th.textContent=label;th.scope='col';head.append(th);}$('detail-head').replaceChildren(head);
   const fragment=document.createDocumentFragment();for(const r of rows.slice((page-1)*size,page*size)){const tr=document.createElement('tr'),td=cell(tr,''),model=document.createElement('span'),software=document.createElement('span');model.textContent=r.model;model.className='model-name';software.textContent=r.software;software.className='software-name';td.append(model,software);for(const[key]of columns){let text=key==='cache_hit_ratio'?rate(r):key.endsWith('_tps')?decimal(r[key]):key.endsWith('_ms')?seconds(r[key]):n(r[key]);if(key==='cached_input_tokens'&&r.cache_unknown_records)text=r.cache_unknown_records===r.records?'未知':text+'（部分）';if(key==='reasoning_output_tokens'&&r.reasoning_unknown_records)text=r.reasoning_unknown_records===r.records?'未知':text+'（部分）';if(key==='cache_write_input_tokens'&&r.write_unknown_records)text=r.write_unknown_records===r.records?'未知':text+'（部分）';cell(tr,text);}fragment.append(tr);}$('rows').replaceChildren(fragment);$('empty').hidden=rows.length>0;$('row-count').textContent=`${rows.length} 行 / 共 ${data.rows.length} 行`;$('page-number').textContent=`${page} / ${pages}`;$('prev-page').disabled=page===1;$('next-page').disabled=page>=pages;
 }
 for(const id of ['search','sort','page-size','extended','show-speed'])$(id).addEventListener(id==='search'?'input':'change',()=>{page=1;renderRows();});$('prev-page').addEventListener('click',()=>{page--;renderRows();});$('next-page').addEventListener('click',()=>{page++;renderRows();});
-const sourceInfo={Codex:'本机日志逐次请求去重，旧格式推算；仅计明确 GPT。任务完成事件另提供整轮耗时与首 Token 等待，含工具时间，不当作生成速度。账户热力图来自服务端汇总，尚未对账；OpenAI 未分类原始请求在 Codex 对账另列，概览仍仅计明确 GPT。',WorkBuddy:'合并 trace 响应与会话 transcript 的原始 usage；共用请求标识去重。trace 标签优先；缺失缓存保留未知，计数冲突不相加。',ZCode:'读取 model_usage；重试按请求标识与尝试次数区分；不重复读取聊天记录。','MiMo Desktop':'读取 MiMoCode 引擎 step-finish；统一缓存与推理口径，排除可识别的导入与继承记录。桌面与 CLI 来源可能无法区分。','DeepSeek Harness':'只读 v3/v4 会话及 Zstandard 压缩日志；输入包含缓存读写，原始 usage 去重。首 Token 从流式片段还原，生成速度与请求速度分开；继承记录不重复计入。'};
+const sourceInfo={Codex:'本机记录按请求去重，旧格式推算。概览、趋势、明细和导出统一汇总 GPT 与有原始计数的 OpenAI 请求，型号别名保留原名；官方账户数值单独对照。任务完成事件另提供含工具时间的整轮耗时与首 Token 等待。',WorkBuddy:'合并 trace 响应与会话 transcript 的原始 usage；共用请求标识去重。trace 标签优先；缺失缓存保留未知，计数冲突不相加。',ZCode:'读取 model_usage；重试按请求标识与尝试次数区分；不重复读取聊天记录。','MiMo Desktop':'读取 MiMoCode 引擎 step-finish；统一缓存与推理口径，排除可识别的导入与继承记录。桌面与 CLI 来源可能无法区分。','DeepSeek Harness':'只读 v3/v4 会话及 Zstandard 压缩日志；输入包含缓存读写，原始 usage 去重。首 Token 从流式片段还原，生成速度与请求速度分开；继承记录不重复计入。'};
 let accountSelectedDate='', accountFollowLatest=true, accountRequestPending=false, accountUiError='', accountErrorCheckedAt=null, reconciliationPending=false;
 const officialDateTime = value => value ? new Intl.DateTimeFormat('zh-CN',{timeZone:'Asia/Shanghai',year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hour12:false}).format(new Date(value)) : '尚未读取';
 function accountReference(){return reconciliationData?.account_reference||{};}
@@ -208,7 +217,7 @@ function renderReconciliationTable(){
 function syncViewContext(){
   const recon=activeTab==='reconciliation';
   $('sidebar-context').innerText=recon?'账户 / 本机对照\n日界线可切换':'本地记录\n北京时间';
-  $('footer-context').textContent=recon?'官方接口 / 本机可观察用量 · 本机日界线：'+basisLabel():'本机记录 · 北京时间 · 统计口径见数据来源';
+  $('footer-context').textContent=recon?'官方接口 / 本机可观察用量 · 本机日界线：'+basisLabel():'北京时间';
 }
 function renderAccountReference(){
   syncViewContext();
@@ -218,6 +227,7 @@ function renderAccountReference(){
   if(accountFollowLatest&&latest)accountSelectedDate=latest;
   if(!accountSelectedDate)accountSelectedDate=dayNow();
   const selected=accountSelectedDate;
+  $('account-local-window').textContent=basis==='utc'?`本机时间段：${selected} 08:00 至次日 08:00（北京时间）；概览是当天 00:00–24:00。`:`本机时间段：${selected} 00:00–24:00（北京时间），与概览日界线相同。`;
   if(document.activeElement!==$('account-day'))$('account-day').value=selected;
   $('account-day').max=latest&&latest>dayNow()?latest:dayNow();
   const row=reference.rows?.find(b=>b.date===selected),official=row?.official_tokens,local=localForRow(row),auxiliary=auxiliaryForRow(row),observed=observedForRow(row);
@@ -225,12 +235,12 @@ function renderAccountReference(){
   $('account-prev').disabled=!previous;$('account-next').disabled=!next;$('account-latest').disabled=!latest||selected===latest;
   $('account-empty').hidden=official!=null;
   $('account-empty').textContent=buckets.length?'官方尚未提供 '+selected+' 的记录；未提供不代表用量为零。':sync.phase==='syncing'?'正在读取官方账户用量；本机统计可以继续查看。':'当前没有可靠的官方每日记录。';
-  const items=[['官方接口日统计',official==null?'未提供':n(official)],['本机可观察合计（'+basisLabel()+' 日）',reconciliationData?n(observed):'正在读取'],['未解释差额（接口 − 本机合计）',official==null?'无法比较':n(official-observed)]];
+  const items=[['官方接口日统计',official==null?'未提供':n(official)],['明确 GPT（'+basisLabel()+' 日）',reconciliationData?n(local):'正在读取'],['OpenAI 未分类（原始用量）',reconciliationData?n(auxiliary):'正在读取'],['本机合计（GPT + 未分类）',reconciliationData?n(observed):'正在读取'],['未解释差额（接口 − 本机合计）',official==null?'无法比较':n(official-observed)]];
   const fragment=document.createDocumentFragment();for(const[label,value]of items){const dt=document.createElement('dt'),dd=document.createElement('dd');dt.textContent=label;dd.textContent=value;fragment.append(dt,dd);}$('account-quality').replaceChildren(fragment);
   $('observed-equation').textContent=`明确 GPT ${n(local)} + OpenAI 未分类 ${n(auxiliary)} = 本机合计 ${n(observed)} Token`;
   const auxiliaryRecords=row?.[basis==='utc'?'utc_auxiliary_records':'beijing_auxiliary_records']??0;
   const conflicts=row?.[basis==='utc'?'utc_auxiliary_conflicts':'beijing_auxiliary_conflicts']??0;
-  $('observed-records').textContent=`OpenAI 未分类 ${n(auxiliaryRecords)} 条原始计数；概览与明细的 GPT 总量保持独立。`+(conflicts?` ${n(conflicts)} 条辅助计数存在冲突，未计入合计。`:'');
+  $('observed-records').textContent=`OpenAI 未分类 ${n(auxiliaryRecords)} 条原始计数。概览、趋势与明细均计入本机合计；与概览比较时使用北京时间。`+(conflicts?` ${n(conflicts)} 条辅助计数存在冲突，未计入合计。`:'');
   const aliases=row?.[basis==='utc'?'utc_auxiliary_models':'beijing_auxiliary_models']||[],aliasRows=document.createDocumentFragment();
   for(const alias of aliases){const tr=document.createElement('tr');cell(tr,alias.model);cell(tr,n(alias.tokens));cell(tr,n(alias.records));aliasRows.append(tr);}
   $('auxiliary-rows').replaceChildren(aliasRows);$('auxiliary-details').hidden=aliases.length===0;

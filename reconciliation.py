@@ -121,7 +121,7 @@ def augment_reference(db_path, reference, now=None):
     }
 
 
-def reconciliation_csv(reference, basis="utc", period="30d", now=None):
+def reconciliation_csv(reference, basis="beijing", period="30d", now=None):
     """Export source-separated aggregate evidence."""
     if basis not in LOCAL_ZONES or period not in ("7d", "30d", "all"):
         raise ValueError("Invalid reconciliation filter")

@@ -63,7 +63,7 @@ def mimo_usage(tokens):
         "reasoning_output_tokens": reasoning, "total_tokens": total})
 
 
-def store_record(db, software, key, usage, when, model, thread, client="", timing=None):
+def store_record(db, software, key, usage, when, model, thread, client="", timing=None, subagent=False):
     if usage is None or when is None:
         return "invalid"
     model = str(model or "未知模型")[:120]
@@ -72,6 +72,8 @@ def store_record(db, software, key, usage, when, model, thread, client="", timin
         if any(existing[k] is not None and usage[k] is not None and existing[k] != usage[k]
                for k in TOKEN_FIELDS):
             return "conflicts"
+        if software == "DeepSeek Harness" and existing["subagent"] != int(bool(subagent)):
+            db.execute("UPDATE usage SET subagent=? WHERE event_key=?", (int(bool(subagent)),key))
         preferred = software == "WorkBuddy" and client == "WorkBuddy trace" and existing["client"] == "WorkBuddy transcript"
         changed = preferred or (existing["model"] == "未知模型" and model != "未知模型")
         changed |= any(existing[k] is None and usage[k] is not None for k in TOKEN_FIELDS)
@@ -79,7 +81,7 @@ def store_record(db, software, key, usage, when, model, thread, client="", timin
             save_timing(db, key, timing)
             return "duplicate"
     values = (key, software, str(client or software)[:80], model, str(thread or "未知会话")[:160],
-              time_string(when), *(usage[k] for k in TOKEN_FIELDS), "request", 0)
+              time_string(when), *(usage[k] for k in TOKEN_FIELDS), "request", int(bool(subagent)))
     db.execute("""INSERT INTO usage VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(event_key) DO UPDATE SET
         model=CASE WHEN usage.model='未知模型' OR (excluded.client='WorkBuddy trace' AND usage.client='WorkBuddy transcript') THEN excluded.model ELSE usage.model END,
@@ -91,6 +93,38 @@ def store_record(db, software, key, usage, when, model, thread, client="", timin
         """, values)
     save_timing(db, key, timing)
     return "saved"
+
+
+def read_workbuddy_trace(path):
+    """Read snapshots or append-only trace events; only completed spans are usable."""
+    if path.suffix != '.jsonl':
+        with path.open('r',encoding='utf-8') as stream:
+            return json.load(stream)
+    trace={};spans={};completed=set();trace_id=None;invalid=0
+    with path.open('r',encoding='utf-8') as stream:
+        for line in stream:
+            if not line.endswith('\n'):break
+            try:event=json.loads(line)
+            except (ValueError,UnicodeDecodeError):invalid+=1;continue
+            if not isinstance(event,dict):invalid+=1;continue
+            kind=event.get('type')
+            if kind not in ('trace_start','trace_end','span_start','span_end'):continue
+            item=event.get('trace' if kind.startswith('trace_') else 'span')
+            if not isinstance(item,dict):invalid+=1;continue
+            current=item.get('traceId')
+            if not isinstance(current,str) or not current or trace_id is not None and current!=trace_id:
+                invalid+=1;continue
+            if trace_id is None:trace_id=current
+            if kind.startswith('trace_'):
+                trace.update(item)
+            else:
+                sid=item.get('spanId')
+                if not isinstance(sid,str) or not sid:invalid+=1;continue
+                spans.setdefault(sid,{}).update(item)
+                if kind=='span_end':completed.add(sid)
+    trace.setdefault('traceId',trace_id)
+    return {'trace':trace,'spans':[span for sid,span in spans.items() if sid in completed],
+            '_invalid_events':invalid}
 
 
 def workbuddy_records(document):
@@ -219,11 +253,13 @@ class LocalCollector(CodexCollector):
     def scan_once(self):
         super().scan_once()
         self.set_status(phase="scanning", source="本地 Agent 用量记录")
+        from execution_speed import scan_execution_samples
         with connect(self.db_path) as db:
             codex_paths=[]
             for folder in (self.home/'sessions',self.home/'archived_sessions'):
                 if folder.is_dir() and not folder.is_symlink():codex_paths.extend(p for p in folder.rglob('*.jsonl') if not p.is_symlink() and p.resolve().is_relative_to(folder.resolve()))
             scan_tasks(db,codex_paths)
+            scan_execution_samples(db,'Codex',codex_paths)
             db.commit()
             for software, path in self.sources.items():
                 state = {"status": "connected", "missing_usage": 0, "invalid": 0, "conflicts": 0,
@@ -242,7 +278,8 @@ class LocalCollector(CodexCollector):
                     elif software == "WorkBuddy":
                         if path.is_symlink():
                             raise OSError("Linked source root")
-                        files = [p for p in path.glob("*/trace_*.json") if not p.is_symlink()
+                        files = [p for pattern in ("*/trace_*.json","*/trace_*.jsonl")
+                                 for p in path.glob(pattern) if not p.is_symlink()
                                  and p.resolve().is_relative_to(path.resolve())]
                         state["files"] = len(files)
                         for file in files:
@@ -287,6 +324,9 @@ class LocalCollector(CodexCollector):
                                     state[result] += 1
                     db.execute("INSERT INTO adapter_states VALUES (?,?) ON CONFLICT(software) DO UPDATE SET state=excluded.state",
                                (software, json.dumps(state)))
+                    task_paths=files if software in ('WorkBuddy','DeepSeek Harness') else ([path] if path.is_file() and not path.is_symlink() else [])
+                    state['execution_timing_errors']=scan_execution_samples(db,software,task_paths)
+                    db.execute("UPDATE adapter_states SET state=? WHERE software=?",(json.dumps(state),software))
                     db.commit()
                 except (OSError, sqlite3.Error, ValueError, TypeError, RuntimeError):
                     db.rollback()
@@ -303,8 +343,9 @@ class LocalCollector(CodexCollector):
         if saved and saved[0] == identity and json.loads(saved[1]).get("timing_version")==1:
             return
         # Changed JSON traces are reread, but response IDs prevent counting them twice.
-        with path.open("r", encoding="utf-8") as stream:
-            records, state = workbuddy_records(json.load(stream))
+        document=read_workbuddy_trace(path)
+        records,state=workbuddy_records(document)
+        state['invalid']=state.get('invalid',0)+document.get('_invalid_events',0)
         state.update(software="WorkBuddy", conflicts=0, timing_version=1)
         for record in records:
             result = store_record(db, "WorkBuddy", **record)
@@ -374,7 +415,8 @@ class LocalCollector(CodexCollector):
                    (str(path), identity, offset, json.dumps(state)))
 
     def read_deepseek(self,db,path):
-        stat=path.stat();identity=f'{stat.st_dev}:{stat.st_ino}:{stat.st_size}:{stat.st_mtime_ns}'
+        # Re-read previously indexed sessions once to populate explicit sub-agent metadata.
+        stat=path.stat();identity=f'dsh-lineage-v1:{stat.st_dev}:{stat.st_ino}:{stat.st_size}:{stat.st_mtime_ns}'
         saved=db.execute('SELECT identity FROM cursors WHERE path=?',(str(path),)).fetchone()
         if saved and saved[0]==identity:return
         try:records,state=session_records(path)
